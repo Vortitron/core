@@ -8,7 +8,7 @@
   "documentation": "https://www.home-assistant.io/integrations/mcp_server",
   "integration_type": "service",
   "iot_class": "local_push",
-  "quality_scale": "silver",
+  "quality_scale": "platinum",
   "requirements": ["mcp==2.3.0", "aiohttp_sse==2.2.0", "anyio==4.16.0"],
   "single_config_entry": true
 }

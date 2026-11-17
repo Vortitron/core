@@ -85,7 +85,7 @@ rules:
   docs-known-limitations: done
   docs-supported-devices: done
   docs-supported-functions: done
-  docs-troubleshooting: todo
+  docs-troubleshooting: done
   docs-use-cases: done
   dynamic-devices:
     status: exempt
@@ -106,7 +106,11 @@ rules:
   icon-translations:
     status: exempt
     comment: Service does not have entities
-  reconfiguration-flow: todo
+  reconfiguration-flow:
+    status: exempt
+    comment: |
+      Setting up the integration asks for nothing. All settings are changed
+      in the options flow.
   repair-issues:
     status: exempt
     comment: Service does not have anything to repair
