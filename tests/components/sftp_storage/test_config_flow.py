@@ -220,3 +220,119 @@ async def test_relative_backup_location_rejected(
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+@pytest.mark.usefixtures("mock_ssh_connection")
+async def test_reconfigure_keeps_credentials(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Test changing the username while keeping the password and private key."""
+    config_entry.add_to_hass(hass)
+    old_data = dict(config_entry.data)
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new_user"}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.title == "new_user@127.0.0.1"
+    assert config_entry.data == {**old_data, CONF_USERNAME: "new_user"}
+    assert Path(old_data[CONF_PRIVATE_KEY_FILE]).exists()
+
+
+@pytest.mark.usefixtures("mock_ssh_connection")
+async def test_reconfigure_new_password(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Test that a new password replaces the password and private key."""
+    config_entry.add_to_hass(hass)
+    old_key_file = Path(config_entry.data[CONF_PRIVATE_KEY_FILE])
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_USERNAME: "username", CONF_PASSWORD: "new_password"},
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.data[CONF_PASSWORD] == "new_password"
+    assert CONF_PRIVATE_KEY_FILE not in config_entry.data
+    assert config_entry.data[CONF_HOST] == "127.0.0.1"
+    assert config_entry.data[CONF_BACKUP_LOCATION] == "/backup_location"
+    assert not old_key_file.exists()
+
+
+@pytest.mark.usefixtures("current_request_with_host")
+@pytest.mark.usefixtures("mock_process_uploaded_file")
+@pytest.mark.usefixtures("mock_ssh_connection")
+async def test_reconfigure_new_private_key(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Test that a new private key replaces the password and old key file."""
+    config_entry.add_to_hass(hass)
+    old_key_file = Path(config_entry.data[CONF_PRIVATE_KEY_FILE])
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_USERNAME: "username",
+            CONF_PRIVATE_KEY_FILE: USER_INPUT[CONF_PRIVATE_KEY_FILE],
+        },
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert CONF_PASSWORD not in config_entry.data
+    assert config_entry.data[CONF_PRIVATE_KEY_FILE] != str(old_key_file)
+    assert not old_key_file.exists()
+
+
+@pytest.mark.usefixtures("current_request_with_host")
+@pytest.mark.usefixtures("mock_process_uploaded_file")
+async def test_reconfigure_error_keeps_current_key(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_ssh_connection: SSHClientConnectionMock,
+) -> None:
+    """Test that a failed reconfigure keeps the entry and its key file."""
+    config_entry.add_to_hass(hass)
+    old_data = dict(config_entry.data)
+    mock_ssh_connection._sftp._mock_chdir.side_effect = PermissionDenied("Denied")
+
+    result = await config_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new_user"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {"base": "permission_denied"}
+    assert config_entry.data == old_data
+    assert Path(old_data[CONF_PRIVATE_KEY_FILE]).exists()
+
+    # A new key that fails is removed again, the current one stays
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_USERNAME: "new_user",
+            CONF_PRIVATE_KEY_FILE: USER_INPUT[CONF_PRIVATE_KEY_FILE],
+        },
+    )
+    assert result["errors"] == {"base": "permission_denied"}
+    assert config_entry.data == old_data
+    assert Path(old_data[CONF_PRIVATE_KEY_FILE]).exists()
+
+    mock_ssh_connection._sftp._mock_chdir.side_effect = None
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new_user"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert config_entry.data == {**old_data, CONF_USERNAME: "new_user"}

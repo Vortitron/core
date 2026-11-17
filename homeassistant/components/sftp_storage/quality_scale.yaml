@@ -123,12 +123,11 @@ rules:
     comment: |
       This integration does not have entities.
   reconfiguration-flow:
-    status: exempt
+    status: done
     comment: |
-      This backup storage integration's configuration consists of static SFTP
-      connection parameters (host, port, credentials, backup path). Changes to
-      these parameters effectively create a connection to a different backup
-      location, which should be configured as a separate integration instance.
+      Reconfiguring changes the username, password or private key. The host,
+      port and backup path identify the backup location, so a different
+      location is set up as a separate entry.
   repair-issues:
     status: exempt
     comment: |

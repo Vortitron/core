@@ -14,6 +14,19 @@
       "unknown": "Unexpected exception ({exception}) occurred during config flow. {error_message}"
     },
     "step": {
+      "reconfigure": {
+        "data": {
+          "password": "[%key:common::config_flow::data::password%]",
+          "private_key_file": "[%key:component::sftp_storage::config::step::user::data::private_key_file%]",
+          "username": "[%key:common::config_flow::data::username%]"
+        },
+        "data_description": {
+          "password": "New password. Leave this and the private key file empty to keep the current ones.",
+          "private_key_file": "New private key file. Leave this and the password empty to keep the current ones.",
+          "username": "[%key:component::sftp_storage::config::step::user::data_description::username%]"
+        },
+        "description": "Change the login for the backup location {backup_location} on {host}."
+      },
       "user": {
         "data": {
           "backup_location": "Remote path",

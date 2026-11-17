@@ -49,6 +49,20 @@ DATA_SCHEMA = probatio.Schema(
     }
 )
 
+# Host, port and backup location identify the backup location, so only the
+# credentials can be changed when reconfiguring.
+RECONFIGURE_SCHEMA = probatio.Schema(
+    {
+        probatio.Required(CONF_USERNAME): str,
+        probatio.Optional(probatio.Secret(CONF_PASSWORD)): TextSelector(
+            config=TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+        probatio.Optional(CONF_PRIVATE_KEY_FILE): FileSelector(
+            FileSelectorConfig(accept="*")
+        ),
+    }
+)
+
 
 class SFTPStorageException(Exception):
     """Base exception for SFTP Storage integration."""
@@ -101,6 +115,92 @@ class SFTPFlowHandler(ConfigFlow, domain=DOMAIN):
 
         return user_input
 
+    async def _async_validate_input(
+        self,
+        user_input: dict[str, Any],
+        placeholders: dict[str, str],
+        *,
+        save_key_file: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Check that the server, credentials and backup location work.
+
+        Returns: the possibly updated `user_input`, and the form errors.
+        """
+        errors: dict[str, str] = {}
+        saved_key_file: str | None = None
+        try:
+            if save_key_file:
+                # Validate auth input and save uploaded key file if provided
+                user_input = await self._validate_auth_and_save_keyfile(user_input)
+                saved_key_file = user_input.get(CONF_PRIVATE_KEY_FILE)
+
+            # Create a session using your credentials
+            user_config = SFTPConfigEntryData(
+                host=user_input[CONF_HOST],
+                port=user_input[CONF_PORT],
+                username=user_input[CONF_USERNAME],
+                password=user_input.get(CONF_PASSWORD),
+                private_key_file=user_input.get(CONF_PRIVATE_KEY_FILE),
+                backup_location=user_input[CONF_BACKUP_LOCATION],
+            )
+
+            placeholders["backup_location"] = user_config.backup_location
+
+            # Raises:
+            # - OSError, if host or port are not correct.
+            # - SFTPStorageInvalidPrivateKey, if private key is not valid format.
+            # - asyncssh.misc.PermissionDenied, if credentials are not correct.
+            # - SFTPStorageMissingPasswordOrPkey, if password
+            #   and private key are not provided.
+            # - asyncssh.sftp.SFTPNoSuchFile, if directory does not exist.
+            # - asyncssh.sftp.SFTPPermissionDenied,
+            #   if we don't have access to said directory
+            async with (
+                connect(
+                    host=user_config.host,
+                    port=user_config.port,
+                    options=await self.hass.async_add_executor_job(
+                        get_client_options, user_config
+                    ),
+                ) as ssh,
+                ssh.start_sftp_client() as sftp,
+            ):
+                await sftp.chdir(user_config.backup_location)
+                await sftp.listdir()
+
+            LOGGER.debug(
+                "Will register SFTP Storage agent with user@host %s@%s",
+                user_config.host,
+                user_config.username,
+            )
+
+        except OSError as e:
+            LOGGER.exception(e)
+            placeholders["error_message"] = str(e)
+            errors["base"] = "os_error"
+        except SFTPStorageInvalidPrivateKey:
+            errors["base"] = "invalid_key"
+        except PermissionDenied as e:
+            placeholders["error_message"] = str(e)
+            errors["base"] = "permission_denied"
+        except SFTPStorageMissingPasswordOrPkey:
+            errors["base"] = "key_or_password_needed"
+        except SFTPNoSuchFile:
+            errors["base"] = "sftp_no_such_file"
+        except SFTPPermissionDenied:
+            errors["base"] = "sftp_permission_denied"
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception(e)
+            placeholders["error_message"] = str(e)
+            placeholders["exception"] = type(e).__name__
+            errors["base"] = "unknown"
+        finally:
+            # We remove the saved private key file if any error occurred.
+            if errors and saved_key_file:
+                await self.hass.async_add_executor_job(_remove_key_file, saved_key_file)
+
+        return user_input, errors
+
     @override
     async def async_step_user(
         self,
@@ -133,82 +233,14 @@ class SFTPFlowHandler(ConfigFlow, domain=DOMAIN):
                     errors=errors,
                 )
 
-            try:
-                # Validate auth input and save uploaded key file if provided
-                user_input = await self._validate_auth_and_save_keyfile(user_input)
-
-                # Create a session using your credentials
-                user_config = SFTPConfigEntryData(
-                    host=user_input[CONF_HOST],
-                    port=user_input[CONF_PORT],
-                    username=user_input[CONF_USERNAME],
-                    password=user_input.get(CONF_PASSWORD),
-                    private_key_file=user_input.get(CONF_PRIVATE_KEY_FILE),
-                    backup_location=user_input[CONF_BACKUP_LOCATION],
-                )
-
-                placeholders["backup_location"] = user_config.backup_location
-
-                # Raises:
-                # - OSError, if host or port are not correct.
-                # - SFTPStorageInvalidPrivateKey, if private key is not valid format.
-                # - asyncssh.misc.PermissionDenied, if credentials are not correct.
-                # - SFTPStorageMissingPasswordOrPkey, if password
-                #   and private key are not provided.
-                # - asyncssh.sftp.SFTPNoSuchFile, if directory does not exist.
-                # - asyncssh.sftp.SFTPPermissionDenied,
-                #   if we don't have access to said directory
-                async with (
-                    connect(
-                        host=user_config.host,
-                        port=user_config.port,
-                        options=await self.hass.async_add_executor_job(
-                            get_client_options, user_config
-                        ),
-                    ) as ssh,
-                    ssh.start_sftp_client() as sftp,
-                ):
-                    await sftp.chdir(user_config.backup_location)
-                    await sftp.listdir()
-
-                LOGGER.debug(
-                    "Will register SFTP Storage agent with user@host %s@%s",
-                    user_config.host,
-                    user_config.username,
-                )
-
-            except OSError as e:
-                LOGGER.exception(e)
-                placeholders["error_message"] = str(e)
-                errors["base"] = "os_error"
-            except SFTPStorageInvalidPrivateKey:
-                errors["base"] = "invalid_key"
-            except PermissionDenied as e:
-                placeholders["error_message"] = str(e)
-                errors["base"] = "permission_denied"
-            except SFTPStorageMissingPasswordOrPkey:
-                errors["base"] = "key_or_password_needed"
-            except SFTPNoSuchFile:
-                errors["base"] = "sftp_no_such_file"
-            except SFTPPermissionDenied:
-                errors["base"] = "sftp_permission_denied"
-            except Exception as e:  # noqa: BLE001
-                LOGGER.exception(e)
-                placeholders["error_message"] = str(e)
-                placeholders["exception"] = type(e).__name__
-                errors["base"] = "unknown"
-            else:
+            user_input, errors = await self._async_validate_input(
+                user_input, placeholders
+            )
+            if not errors:
                 return self.async_create_entry(
-                    title=f"{user_config.username}@{user_config.host}",
+                    title=f"{user_input[CONF_USERNAME]}@{user_input[CONF_HOST]}",
                     data=user_input,
                 )
-            finally:
-                # We remove the saved private key file if any error occurred.
-                if errors and bool(user_input.get(CONF_PRIVATE_KEY_FILE)):
-                    keyfile = Path(user_input[CONF_PRIVATE_KEY_FILE])
-                    keyfile.unlink(missing_ok=True)
-                    with suppress(OSError):
-                        keyfile.parent.rmdir()
 
         if user_input:
             user_input.pop(CONF_PRIVATE_KEY_FILE, None)
@@ -219,6 +251,68 @@ class SFTPFlowHandler(ConfigFlow, domain=DOMAIN):
             description_placeholders=placeholders,
             errors=errors,
         )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change the username, password or private key."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        placeholders: dict[str, str] = {
+            CONF_HOST: entry.data[CONF_HOST],
+            CONF_BACKUP_LOCATION: entry.data[CONF_BACKUP_LOCATION],
+        }
+
+        if user_input is not None:
+            new_data = {
+                CONF_HOST: entry.data[CONF_HOST],
+                CONF_PORT: entry.data[CONF_PORT],
+                CONF_BACKUP_LOCATION: entry.data[CONF_BACKUP_LOCATION],
+                **user_input,
+            }
+            # Leaving both empty keeps the current password and private key
+            keep_credentials = not (
+                user_input.get(CONF_PASSWORD) or user_input.get(CONF_PRIVATE_KEY_FILE)
+            )
+            if keep_credentials:
+                for key in (CONF_PASSWORD, CONF_PRIVATE_KEY_FILE):
+                    if entry.data.get(key):
+                        new_data[key] = entry.data[key]
+
+            new_data, errors = await self._async_validate_input(
+                new_data, placeholders, save_key_file=not keep_credentials
+            )
+            if not errors:
+                old_key_file = entry.data.get(CONF_PRIVATE_KEY_FILE)
+                if old_key_file and old_key_file != new_data.get(CONF_PRIVATE_KEY_FILE):
+                    await self.hass.async_add_executor_job(
+                        _remove_key_file, old_key_file
+                    )
+                return self.async_update_reload_and_abort(
+                    entry,
+                    title=f"{new_data[CONF_USERNAME]}@{new_data[CONF_HOST]}",
+                    data=new_data,
+                )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                RECONFIGURE_SCHEMA,
+                {CONF_USERNAME: entry.data[CONF_USERNAME]}
+                if user_input is None
+                else {CONF_USERNAME: user_input[CONF_USERNAME]},
+            ),
+            description_placeholders=placeholders,
+            errors=errors,
+        )
+
+
+def _remove_key_file(key_file: str) -> None:
+    """Remove a saved private key file, and its directory if now empty."""
+    keyfile = Path(key_file)
+    keyfile.unlink(missing_ok=True)
+    with suppress(OSError):
+        keyfile.parent.rmdir()
 
 
 async def save_uploaded_pkey_file(hass: HomeAssistant, uploaded_file_id: str) -> str:
